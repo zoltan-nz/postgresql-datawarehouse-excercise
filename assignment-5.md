@@ -4,6 +4,14 @@ Zoltan Debre - 300360191
 
 Original repository and progress history: https://github.com/zoltan-nz/postgresql-datawarehouse-excercise
 
+Everything inserted in one runnable `sql` file which can be run with the following way if `dbname` exists:
+
+```
+$ psql --dbname=zoltan --file=./assignment-5.sql
+```
+
+The above command will import also the `dump` file. 
+
 ## Question 1 - A Data Mart in the PostgreSQL Environment
 (12 marks)
 
@@ -78,11 +86,38 @@ SELECT COUNT(time.TimeId) FROM time;
 
 Note: `Amnt = SUM(Order_Detail.Quantity * Book.Price)`
 
-Traditional way. We crate a table and insert data from other tables. (Below we can see a more efficient way to create sales aggregation with materialized view.)  
+Traditional way. We crate a table and insert data from other tables. (Below we can see a more efficient way to create sales aggregation with materialized view. I will use the materialized view `sales` table in this assignment.)  
 
 ```sql
+CREATE TABLE sales_table
+(
+  customerid INTEGER       NOT NULL
+    CONSTRAINT sales_customer_customerid_fk
+    REFERENCES customer,
+  timeid     INTEGER       NOT NULL
+    CONSTRAINT sales_time_timeid_fk
+    REFERENCES time,
+  isbn       INTEGER       NOT NULL
+    CONSTRAINT sales_book_isbn_fk
+    REFERENCES book,
+  amnt       NUMERIC(6, 2) NOT NULL,
+  CONSTRAINT sales_customerid_timeid_isbn_pk PRIMARY KEY (customerid, timeid, isbn)
+);
+
+INSERT INTO sales_table (customerid, timeid, isbn, amnt)
+  SELECT
+    customer.customerid                     AS customerid,
+    time.timeid                             AS timeid,
+    book.isbn                               AS isbn,
+    sum(order_detail.quantity * book.price) AS amnt
+  FROM order_detail NATURAL JOIN book NATURAL JOIN cust_order NATURAL JOIN customer NATURAL JOIN time
+  GROUP BY customer.customerid, time.timeid, book.isbn;
+```
 
 ```
+
+```
+
 
 **Creating SALES_VIEW table (using materialized view)**
 
@@ -91,16 +126,16 @@ Note: `Amnt = SUM(Order_Detail.Quantity * Book.Price)`
 This is an alternative approach, so we can use materialized view for storing sales aggregation.
 
 ```sql
-DROP MATERIALIZED VIEW IF EXISTS sales;
+DROP MATERIALIZED VIEW IF EXISTS sales CASCADE;
 
 CREATE MATERIALIZED VIEW sales AS
   SELECT
-    customer.customerid                     AS CustomerId,
-    time.TimeId                             AS TimeId,
-    book.isbn                               AS ISBN,
-    sum(order_detail.quantity * book.price) AS Amnt
+    customer.customerid                                      AS CustomerId,
+    time.timeid                                              AS TimeId,
+    book.isbn                                                AS ISBN,
+    sum(order_detail.quantity * book.price) :: numeric(6, 2) AS Amnt
   FROM book NATURAL JOIN order_detail NATURAL JOIN cust_order NATURAL JOIN customer NATURAL JOIN time
-  GROUP BY customer.customerid, TimeId, ISBN
+  GROUP BY customer.customerid, time.timeid, book.isbn
   ORDER BY CustomerId, TimeId, ISBN;
   
 CREATE UNIQUE INDEX sales_CustomerIdTimeIdISBN_uindex ON sales (CustomerId, TimeId, ISBN);  
@@ -198,9 +233,14 @@ FROM avg_spending_by_customer_on_each_day;
 ## Question 3. OLAP Queries
 (20 marks)
 
-a) Use SQL to retrieve from your Data Mart: `customer id`’s, `names` and `surnames` of `five` customers who spent the **largest** amount of money buying books. This query uses two OLAP specific operations, name them.
+**a)** 
+
+Use SQL to retrieve from your Data Mart: `customer id`’s, `names` and `surnames` of `five` customers who spent the **largest** amount of money buying books. This query uses two OLAP specific operations, name them.
+
+(The result added to a materialized view, because we use it later.)
 
 ```sql
+CREATE MATERIALIZED VIEW best_buyers AS
 SELECT
   customer.CustomerId AS customer_id,
   customer.f_name     AS first_name,
@@ -210,6 +250,10 @@ FROM sales
   NATURAL JOIN customer
 GROUP BY customer.CustomerId
 ORDER BY spending DESC LIMIT 5;
+
+SELECT 5
+
+SELECT * FROM best_buyers;
 
  customer_id |      first_name      |      last_name       | spending
 -------------+----------------------+----------------------+----------
@@ -221,8 +265,139 @@ ORDER BY spending DESC LIMIT 5;
 (5 rows)
 ```
 
-**OLAP operations:**
+**Used OLAP operations:**
 
 * *Dimensional roll-ups*, because we drop `book` and `time` dimension from our calculation.
-* *Pivoting*, because for our `sales` table we use three dimensions to aggregate our values
+* *Pivoting*, because we use three dimensions to aggregate our values for our `sales` table. 
 
+**b)** 
+
+Use SQL to find from your `Data Mart` and `the operational database` whether the customer who spent the greatest amount of money buying books did this by issuing many orders with smaller amounts or a few orders with greater amounts of money, or even great number of orders with greater amounts of money. Base your answer on an appropriate average value and the percentage of best buyer’s orders being smaller or greater than this average. What is the name of that OLAP specific operation? (You may use a stepwise procedure to solve the question.)
+
+* `ord_avg_amnt`: the average amount of money of all orders
+
+The first materialized view calculate the value of orders and after we calculate the average value of this list.
+```sql
+CREATE MATERIALIZED VIEW amount_per_order AS
+  SELECT
+    order_detail.orderid,
+    sum(order_detail.quantity * book.price) AS order_amount
+  FROM order_detail NATURAL JOIN book
+  GROUP BY orderid;
+
+SELECT 222
+
+CREATE MATERIALIZED VIEW ord_avg_amnt AS
+  SELECT avg(amount_per_order.order_amount) AS ord_avg_amnt
+  FROM amount_per_order;
+
+SELECT 1
+
+SELECT * FROM ord_avg_amnt;
+
+     ord_avg_amnt
+----------------------
+ 777.7702702702702703
+(1 row)
+```
+
+* `no_of_ord`: the number of orders issued by the customer who spent the greatest amount of money buying books (the best buyer)
+
+```sql
+CREATE MATERIALIZED VIEW no_of_ord AS
+  SELECT count(cust_order.orderid) AS no_of_ord FROM cust_order
+  WHERE cust_order.customerid IN (SELECT customer_id from best_buyers limit 1)
+  GROUP BY cust_order.customerid;
+
+SELECT 1
+
+SELECT * FROM no_of_ord;
+
+ no_of_ord
+-----------
+        14
+(1 row)
+```
+
+* `perc_of_ord`: the percentage of orders issued by the best buyer that had a greater total amount than the ord_avg_amnt.
+
+```sql
+CREATE MATERIALIZED VIEW amount_per_order_by_customer AS
+  SELECT
+    order_detail.orderid,
+    sum(order_detail.quantity * book.price) AS order_amount
+  FROM order_detail NATURAL JOIN book NATURAL JOIN cust_order NATURAL JOIN customer
+  WHERE cust_order.customerid IN (SELECT customer_id FROM best_buyers LIMIT 1)
+  GROUP BY orderid;
+
+SELECT 14
+```
+
+List of orders by the customers with amount:
+
+```sql
+SELECT * FROM amount_per_order_by_customer;
+ orderid | order_amount
+---------+--------------
+     170 |       250.00
+     107 |      2535.00
+     111 |       915.00
+       8 |      1245.00
+      19 |      1120.00
+     108 |      4165.00
+       1 |       885.00
+      21 |       395.00
+     112 |       260.00
+       4 |       925.00
+     110 |      1910.00
+       5 |       925.00
+     172 |       450.00
+     114 |      1830.00
+(14 rows)
+```
+
+How many percentage above average:
+
+```sql
+CREATE MATERIALIZED VIEW perc_of_ord AS
+  SELECT (count(*) * 100) :: NUMERIC / no_of_ord.no_of_ord AS perc_of_ord
+  FROM amount_per_order_by_customer NATURAL JOIN ord_avg_amnt NATURAL JOIN no_of_ord
+  WHERE amount_per_order_by_customer.order_amount > ord_avg_amnt.ord_avg_amnt
+  GROUP BY no_of_ord.no_of_ord;
+  
+SELECT 1
+
+SELECT * FROM perc_of_ord;
+
+     perc_of_ord
+---------------------
+ 71.4285714285714286
+(1 row)
+```
+
+Conclusion:
+
+```sql
+SELECT perc_of_ord,
+  CASE
+    WHEN perc_of_ord >= 75
+      THEN 'we estimate that the best buyer has issued a greater (than average) number of orders with 
+      greater (than average) amounts of money'
+    WHEN perc_of_ord < 75 AND perc_of_ord >= 50
+      THEN 'we estimate that the best buyer has issued a greater (than average) to medium number of 
+      orders with greater (than average) amounts of money'
+    WHEN perc_of_ord < 50 AND perc_of_ord >= 25
+      THEN 'we estimate that the best buyer has issued a small to medium number of orders with 
+      greater (than average) amounts of money'
+    WHEN perc_of_ord < 25
+      THEN 'we estimate that the best buyer has issued a small number of orders with greater 
+      (than average) amounts of money'
+  END
+FROM perc_of_ord;
+
+     perc_of_ord     |                                                                    case
+---------------------+----------------------------------------------------------------------------------------
+ 71.4285714285714286 | we estimate that the best buyer has issued a greater (than average) to medium number of 
+                       orders with greater (than average) amounts of money
+(1 row)
+```
