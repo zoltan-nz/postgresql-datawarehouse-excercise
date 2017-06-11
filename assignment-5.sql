@@ -43,8 +43,8 @@ CREATE TABLE time
 (
   TimeId    SERIAL PRIMARY KEY NOT NULL,
   OrderDate DATE               NOT NULL,
-  DayOfWeek VARCHAR(10)        NOT NULL,
-  Month     VARCHAR(10)        NOT NULL,
+  DayOfWeek CHAR(10)           NOT NULL,
+  Month     CHAR(10)           NOT NULL,
   Year      INT                NOT NULL
 );
 CREATE UNIQUE INDEX time_TimeId_uindex ON time (TimeId);
@@ -268,15 +268,347 @@ SELECT * FROM perc_of_ord;
 \echo Conclusion:
 \echo
 
-SELECT perc_of_ord,
+SELECT
+  perc_of_ord,
   CASE
-    WHEN perc_of_ord >= 75
-      THEN 'we estimate that the best buyer has issued a greater (than average) number of orders with greater (than average) amounts of money'
-    WHEN perc_of_ord < 75 AND perc_of_ord >= 50
-      THEN 'we estimate that the best buyer has issued a greater (than average) to medium number of orders with greater (than average) amounts of money'
-    WHEN perc_of_ord < 50 AND perc_of_ord >= 25
-      THEN 'we estimate that the best buyer has issued a small to medium number of orders with greater (than average) amounts of money'
-    WHEN perc_of_ord < 25
-      THEN 'we estimate that the best buyer has issued a small number of orders with greater (than average) amounts of money'
+  WHEN perc_of_ord >= 75
+    THEN 'we estimate that the best buyer has issued a greater (than average) number of orders with greater (than average) amounts of money'
+  WHEN perc_of_ord < 75 AND perc_of_ord >= 50
+    THEN 'we estimate that the best buyer has issued a greater (than average) to medium number of orders with greater (than average) amounts of money'
+  WHEN perc_of_ord < 50 AND perc_of_ord >= 25
+    THEN 'we estimate that the best buyer has issued a small to medium number of orders with greater (than average) amounts of money'
+  WHEN perc_of_ord < 25
+    THEN 'we estimate that the best buyer has issued a small number of orders with greater (than average) amounts of money'
   END
 FROM perc_of_ord;
+
+--
+-- QUESTION 4
+--
+
+\echo
+\echo -----------------------------------------------
+\echo Question 4 - Queries Against Materialized Views
+\echo -----------------------------------------------
+\echo
+
+\echo
+\echo a)
+\echo
+
+DROP MATERIALIZED VIEW IF EXISTS View1 CASCADE;
+CREATE MATERIALIZED VIEW View1 AS
+  SELECT
+    c.CustomerId,
+    F_Name,
+    L_Name,
+    District,
+    TimeId,
+    DayOfWeek,
+    ISBN,
+    Amnt
+  FROM sales NATURAL JOIN Customer c NATURAL JOIN Time;
+
+DROP MATERIALIZED VIEW IF EXISTS View2 CASCADE;
+CREATE MATERIALIZED VIEW View2 AS
+  SELECT
+    c.CustomerId,
+    F_Name,
+    L_Name,
+    Year,
+    sum(Amnt)
+  FROM sales NATURAL JOIN Customer c NATURAL JOIN Time
+  GROUP BY c.CustomerId, F_Name, L_Name, Year;
+
+
+\echo
+\echo The Book Orders Database
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  customer.CustomerId AS customer_id,
+  customer.f_name     AS first_name,
+  customer.l_name     AS last_name,
+  sum(amnt)           AS spending
+FROM
+  (
+    SELECT
+      customer.customerid                                      AS CustomerId,
+      time.timeid                                              AS TimeId,
+      book.isbn                                                AS ISBN,
+      sum(order_detail.quantity * book.price) :: NUMERIC(6, 2) AS Amnt
+    FROM book NATURAL JOIN order_detail NATURAL JOIN cust_order NATURAL JOIN customer NATURAL JOIN time
+    GROUP BY customer.customerid, time.timeid, book.isbn
+    ORDER BY CustomerId, TimeId, ISBN
+  ) AS sales
+  NATURAL JOIN customer
+GROUP BY customer.CustomerId
+ORDER BY spending DESC LIMIT 5;
+VACUUM ANALYZE;
+
+\echo
+\echo The Data Mart
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  customer.CustomerId AS customer_id,
+  customer.f_name     AS first_name,
+  customer.l_name     AS last_name,
+  sum(amnt)           AS spending
+FROM sales
+  NATURAL JOIN customer
+GROUP BY customer.CustomerId
+ORDER BY spending DESC LIMIT 5;
+VACUUM ANALYZE;
+
+\echo
+\echo The View 1
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  customerid AS customer_id,
+  f_name     AS first_name,
+  l_name     AS last_name,
+  sum(amnt)  AS spending
+FROM View1
+GROUP BY customer_id, first_name, last_name
+ORDER BY spending DESC LIMIT 5;
+VACUUM ANALYZE;
+
+\echo
+\echo The View 2
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  customerid AS customer_id,
+  f_name     AS first_name,
+  l_name     AS last_name,
+  sum(sum)   AS spending
+FROM View2
+GROUP BY customer_id, first_name, last_name
+ORDER BY spending DESC LIMIT 5;
+VACUUM ANALYZE;
+
+\echo
+\echo b)
+\echo
+
+DROP MATERIALIZED VIEW IF EXISTS View3 CASCADE;
+CREATE MATERIALIZED VIEW View3 AS
+  SELECT
+    District,
+    TimeId,
+    DayOfWeek,
+    ISBN,
+    sum(Amnt)
+  FROM Sales NATURAL JOIN Customer NATURAL JOIN time
+  GROUP BY District, TimeId, DayOfWeek, ISBN;
+
+\echo
+\echo The Book Orders Database
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  country   AS Country,
+  sum(amnt) AS Spending
+FROM customer NATURAL JOIN
+  (SELECT
+     customer.customerid                                      AS CustomerId,
+     time.timeid                                              AS TimeId,
+     book.isbn                                                AS ISBN,
+     sum(order_detail.quantity * book.price) :: NUMERIC(6, 2) AS Amnt
+   FROM
+     book NATURAL JOIN order_detail NATURAL JOIN cust_order NATURAL JOIN customer NATURAL JOIN time
+   GROUP BY customer.customerid, time.timeid, book.isbn
+   ORDER BY CustomerId, TimeId, ISBN) AS sales
+GROUP BY Country ORDER BY Spending DESC LIMIT 1;
+VACUUM ANALYZE;
+
+\echo
+\echo The Data Mart
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  country   AS Country,
+  sum(amnt) AS Spending
+FROM customer NATURAL JOIN sales
+GROUP BY Country ORDER BY Spending DESC LIMIT 1;
+VACUUM ANALYZE;
+
+\echo
+\echo The View 2
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  country  AS Country,
+  sum(sum) AS Spending
+FROM View2 NATURAL JOIN customer
+GROUP BY Country ORDER BY Spending DESC LIMIT 1;
+VACUUM ANALYZE;
+
+
+\echo
+\echo The View 3
+\echo
+
+EXPLAIN ANALYZE
+SELECT
+  c.country AS Country,
+  sum(sum)  AS Spending
+FROM View3 NATURAL JOIN
+  (SELECT DISTINCT
+     district,
+     country FROM customer) AS c
+GROUP BY Country ORDER BY Spending DESC LIMIT 1;
+VACUUM ANALYZE;
+
+--
+-- QUESTION 5
+--
+
+\echo
+\echo -----------------------------------------------
+\echo Question 5 - Queries with WINDOW Function
+\echo -----------------------------------------------
+\echo
+
+\echo
+\echo a)
+\echo
+
+\echo First, without window function
+\echo
+\echo Sum of amounts spent by customers in April and May in 2017:
+
+SELECT
+  customerid AS CustomerId,
+  f_name     AS FirstName,
+  sum(amnt)  AS SumOfSalesByCustomer
+FROM sales NATURAL JOIN customer NATURAL JOIN time
+WHERE (Month IN ('April', 'May')) AND (Year = 2017)
+GROUP BY CustomerId, FirstName
+ORDER BY CustomerId;
+
+\echo
+\echo Avg spending by city in April and May in 2017
+\echo
+
+SELECT
+  city      AS City,
+  avg(amnt) AS AvgOfSalesByCity
+FROM sales NATURAL JOIN customer NATURAL JOIN time
+WHERE (Month IN ('April', 'May')) AND (Year = 2017)
+GROUP BY city;
+
+\echo
+\echo Using Window feature to merge these two queries:
+\echo
+
+SELECT DISTINCT * FROM
+  (
+    SELECT
+      customerid             AS CustomerId,
+      f_name                 AS FirstName,
+      city                   AS City,
+      sum(amnt) OVER CustWin AS SumOfSalesByCustomer,
+      avg(amnt) OVER CityWin AS AvgOfSalesByCity
+    FROM sales NATURAL JOIN customer NATURAL JOIN time
+    WHERE (Month IN ('April', 'May')) AND (Year = 2017)
+    WINDOW
+        CustWin AS ( PARTITION BY customerId ),
+        CityWin AS ( PARTITION BY city )
+  ) AS SalesReport ORDER BY City;
+
+\echo
+\echo Different report, where we calculate average spending by customer for the given period and not average spending by transactions.
+\echo
+
+DROP MATERIALIZED VIEW IF EXISTS customer_spending CASCADE;
+CREATE MATERIALIZED VIEW customer_spending AS
+  SELECT
+    customerid AS CustomerId,
+    f_name     AS FirstName,
+    city       AS City,
+    sum(amnt)  AS AmountOfSpending
+  FROM sales NATURAL JOIN customer NATURAL JOIN time
+  WHERE year = 2017 AND month IN ('April', 'May')
+  GROUP BY CustomerId, FirstName, City
+  ORDER BY City;
+
+\echo
+\echo In this case the average reflects the spending of a customer in the whole period in a city.
+\echo
+
+SELECT
+  CustomerId,
+  FirstName,
+  City,
+  AmountOfSpending,
+  avg(AmountOfSpending) OVER CityWin AS AvgSpendingByCity
+FROM customer_spending
+WINDOW CityWin AS ( PARTITION BY city )
+ORDER BY city;
+
+\echo
+\echo b)
+\echo
+
+\echo Using a materialized view and a query
+
+DROP MATERIALIZED VIEW IF EXISTS sum_per_day_per_city CASCADE;
+
+CREATE MATERIALIZED VIEW sum_per_day_per_city AS
+  SELECT
+    city,
+    timeid,
+    OrderDate AS day,
+    sum(amnt) AS SumSpending
+  FROM sales NATURAL JOIN time NATURAL JOIN customer
+  WHERE Month IN ('April', 'May') AND Year = 2017
+  GROUP BY city, timeid, OrderDate
+  ORDER BY city, timeid;
+
+
+
+SELECT
+  city,
+  timeid,
+  day,
+  SumSpending                   AS "sum(amnt)",
+  sum(SumSpending) OVER WinCity AS cumulative_sum
+FROM sum_per_day_per_city
+WINDOW WinCity AS ( PARTITION BY city ORDER BY timeid )
+ORDER BY city, timeid;
+
+
+
+\echo
+\echo Here is a solution using one query, but I think it is not easy to mainain for long term. I would prefer a cleaner simple way implementation in real world scenario.
+\echo
+
+
+SELECT
+  city,
+  timeid,
+  OrderDate                     AS day,
+  SumSpending                   AS "sum(amnt)",
+  sum(SumSpending) OVER WinCity AS cumulative_sum
+FROM (
+       SELECT DISTINCT
+         city,
+         timeid,
+         orderdate,
+         sum(amnt) OVER WinDate AS SumSpending
+       FROM sales NATURAL JOIN customer NATURAL JOIN time
+       WHERE Month IN ('April', 'May') AND Year = 2017
+       WINDOW WinDate AS ( PARTITION BY city, timeid )
+     ) AS sum_per_day_per_city
+WINDOW WinCity AS ( PARTITION BY city ORDER BY timeid )
+ORDER BY city, timeid;
